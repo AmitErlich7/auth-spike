@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Auth Spike">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <title>Auth Spike</title>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; margin: 0; padding: 16px; max-width: 480px; }
+    h1 { font-size: 20px; margin: 0 0 12px; }
+    .box { border: 1px solid #ccc; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+    .status { font-size: 18px; font-weight: 600; }
+    .ok { color: #15803d; } .bad { color: #b91c1c; }
+    button, input { font-size: 17px; padding: 12px; margin: 4px 0; width: 100%; box-sizing: border-box; }
+    pre { white-space: pre-wrap; font-size: 12px; margin: 0; }
+    small { color: #555; }
+  </style>
+</head>
+<body>
+  <h1>Auth Spike (throwaway)</h1>
+
+  <div class="box">
+    <div id="status" class="status">checking…</div>
+    <div id="details"></div>
+  </div>
+
+  <div class="box">
+    <button id="google">Continue with Google</button>
+  </div>
+
+  <div class="box">
+    <input id="email" type="email" inputmode="email" autocomplete="email" placeholder="your email">
+    <button id="send">Email me a code</button>
+    <input id="code" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code">
+    <button id="verify">Sign in with code</button>
+  </div>
+
+  <div class="box">
+    <button id="signout">Sign out</button>
+    <button id="clearlog">Clear log</button>
+  </div>
+
+  <div class="box">
+    <strong>Log (kept on this device)</strong>
+    <pre id="log"></pre>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+  <script src="config.js"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    // A log that survives closing the app, so we can see what happened across launches.
+    const LOG_KEY = "spike-log";
+    function readLog() { try { return JSON.parse(localStorage.getItem(LOG_KEY) || "[]"); } catch { return []; } }
+    function log(msg) {
+      const lines = readLog();
+      lines.push(new Date().toLocaleTimeString() + "  " + msg);
+      try { localStorage.setItem(LOG_KEY, JSON.stringify(lines.slice(-40))); } catch {}
+      $("log").textContent = lines.slice(-40).join("\n");
+    }
+
+    // Is this page running as the installed home-screen app, or inside Safari?
+    const standalone = window.navigator.standalone === true ||
+      window.matchMedia("(display-mode: standalone)").matches;
+    const where = standalone ? "HOME-SCREEN APP" : "SAFARI TAB";
+
+    const cfg = window.SPIKE_CONFIG;
+    if (cfg.SUPABASE_URL.startsWith("PASTE")) {
+      $("status").textContent = "Fill in config.js first";
+      $("status").className = "status bad";
+      throw new Error("config.js not filled in");
+    }
+
+    const supabase = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY, {
+      auth: { flowType: "pkce", persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
+    });
+
+    async function show() {
+      const { data, error } = await supabase.auth.getSession();
+      const s = data && data.session;
+      if (s) {
+        $("status").textContent = "SIGNED IN";
+        $("status").className = "status ok";
+        const exp = new Date(s.expires_at * 1000).toLocaleString();
+        $("details").textContent = where + " | " + (s.user.email || "no email") +
+          " | via " + (s.user.app_metadata.provider || "?") + " | token expires " + exp;
+      } else {
+        $("status").textContent = "NOT signed in";
+        $("status").className = "status bad";
+        $("details").textContent = where + (error ? " | " + error.message : "");
+      }
+      return s;
+    }
+
+    supabase.auth.onAuthStateChange((event, session) => {
+      log("event " + event + (session ? " (" + (session.user.email || "?") + ")" : ""));
+      show();
+    });
+
+    // What happened when the page opened? This line is the main evidence.
+    (async () => {
+      const url = new URL(location.href);
+      const hasCode = url.searchParams.has("code");
+      const urlError = url.searchParams.get("error_description");
+      if (urlError) log("URL ERROR: " + urlError);
+      const s = await show();
+      log("OPEN in " + where + (hasCode ? " (came back from Google)" : "") +
+        " -> " + (s ? "signed in as " + s.user.email : "NOT signed in"));
+    })();
+
+    $("google").onclick = async () => {
+      log("tap Google (in " + where + ")");
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: { redirectTo: location.origin + location.pathname },
+      });
+      if (error) log("Google error: " + error.message);
+    };
+
+    $("send").onclick = async () => {
+      const email = $("email").value.trim();
+      log("ask code for " + email);
+      const { error } = await supabase.auth.signInWithOtp({ email });
+      log(error ? "send error: " + error.message : "code email requested");
+    };
+
+    $("verify").onclick = async () => {
+      const email = $("email").value.trim();
+      const token = $("code").value.trim();
+      const { error } = await supabase.auth.verifyOtp({ email, token, type: "email" });
+      log(error ? "verify error: " + error.message : "code accepted");
+      show();
+    };
+
+    $("signout").onclick = async () => { await supabase.auth.signOut(); log("signed out"); show(); };
+    $("clearlog").onclick = () => { localStorage.removeItem(LOG_KEY); $("log").textContent = ""; };
+
+    $("log").textContent = readLog().join("\n");
+  </script>
+</body>
+</html>
